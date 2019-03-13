@@ -10,6 +10,7 @@ import glob, datetime, sys
 from utils import Tee
 from constants import *
 from utils import key_press, key_release
+from pyglet.window import key
 
 # if LOGGING:
 # 	log_file_name = datetime.datetime.now().strftime("log_%Y_%m_%d_%H_%M_%S.txt")
@@ -22,12 +23,19 @@ class QNetwork(nn.Module):
 	def __init__(self, env, lr, eps, decay):
 		super().__init__()
 		self.env = env
+		self.conv = nn.Sequential(
+			nn.Conv2d(1, 16, 8),
+			nn.ReLU(),
+			nn.Conv2d(16, 16, 8),
+			nn.ReLU(),
+			nn.Conv2d(16, 16, 8),
+			nn.ReLU(),
+		)
 		self.fc = nn.Sequential(
-			nn.Linear(4, 32),
+			nn.Linear(16*27*27, 128),
 			nn.ReLU(),
-			nn.Linear(32, 64),
-			nn.ReLU(),
-			nn.Linear(64, env.action_space.n)
+			nn.Linear(128, 4),
+			# nn.Sigmoid(),
 		)
 		self.optimizer = optim.Adam(self.parameters(), lr=lr)
 		self.loss = nn.MSELoss()
@@ -35,7 +43,10 @@ class QNetwork(nn.Module):
 		self.decay = decay
 
 	def forward(self, x):
-		x = self.fc(x)
+		with torch.autograd.set_detect_anomaly(True):
+			x = self.conv(x)
+			x = x.view(-1, 16*27*27)
+			x = self.fc(x)
 		return x
 
 	def backprop(self, x, y):
@@ -44,7 +55,6 @@ class QNetwork(nn.Module):
 		loss = self.loss(output, y)
 		loss.backward()
 		self.optimizer.step()
-		self.eps *= self.decay
 		return loss.item()
 
 	def predict(self, x):
@@ -54,7 +64,7 @@ class QNetwork(nn.Module):
 
 	def choose_action(self, x):
 		if np.random.rand() <= self.eps:
-			return np.random.choice(self.env.action_space.n)
+			return np.random.choice(4)
 		else:
 			[Q] = self.predict(np.resize(x, (1, *x.shape)))
 			values, indices = torch.max(Q, 0)
@@ -77,7 +87,7 @@ class QNetwork(nn.Module):
 
 def play_episode(env, eb, dqn, i):
 	global EXPERIENCE_BUFFER_EXPLORE, MINIBATCH_SIZE
-	global STEP, STEP_MOD, SAVE_MODELS
+	global STEP, STEP_MOD, SAVE_MODELS, EPSILON_DECAY_STEP, EPSILON_MIN
 
 	# (1) Reset
 	obs = env.reset()
@@ -91,9 +101,9 @@ def play_episode(env, eb, dqn, i):
 
 	# (4) Assign key_press and key_release functions
 	action = np.array([0.0, 0.0, 0.0])
-	env.render()
-	env.env.viewer.window.on_key_press = lambda k, mod: key_press(k, mod, action)
-	env.env.viewer.window.on_key_release = lambda k, mod: key_release(k, mod, action)
+	# env.render()
+	# env.env.viewer.window.on_key_press = lambda k, mod: key_press(k, mod, action)
+	# env.env.viewer.window.on_key_release = lambda k, mod: key_release(k, mod, action)
 
 	ep_reward = 0
 	losses = []
@@ -103,12 +113,18 @@ def play_episode(env, eb, dqn, i):
 		env.render()
 
 		# choose action, eps greedy and step
-		# action = dqn.choose_action(obs)
+		key_action = dqn.choose_action(ds(obs))
+		key_pressed = {0: key.LEFT, 1: key.RIGHT, 2: key.UP, 3: key.DOWN}[key_action]
+		key_press(key_pressed, None, action)
 		next_obs, r, done, info = env.step(action)
 
 		# add experience tuple
-		experience = (obs, action, r, next_obs, done)
+		experience = (ds(obs), action, r, ds(next_obs), done)
 		eb.add(experience)
+		key_release(key_pressed, None, action)
+
+		if STEP % EPSILON_DECAY_STEP and dqn.eps > EPSILON_MIN:
+			dqn.eps *= dqn.decay
 
 		# train
 		if len(eb) > EXPERIENCE_BUFFER_EXPLORE:
@@ -146,11 +162,13 @@ eb = ExperienceBuffer(size=EXPERIENCE_BUFFER_SIZE)
 # 	dqn = torch.load('model%d.pt' % max_num)
 # 	STEP += max_num*STEP_MOD
 # else:
-dqn = None # QNetwork(env, lr=0.001, eps=EPSILON_START, decay=EPSILON_DECAY)
-# summary(dqn, (1, 4))
+dqn = QNetwork(env, lr=0.00001, eps=EPSILON_START, decay=EPSILON_DECAY)
+summary(dqn, (1, 48, 48))
 
 # Infinite episodes
 EP = 1
-while True: 
+while EP < 1000: 
 	play_episode(env, eb, dqn, EP)
 	EP += 1
+
+env.close()
